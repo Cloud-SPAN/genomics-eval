@@ -1,0 +1,233 @@
+---
+title: "Genomics Survey Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(googlesheets4)
+library(ggnewscale)
+library(knitr)
+library(ggiraph)
+library(cowplot)
+options(gargle_oauth_email = "evelyn.greeves@york.ac.uk")
+```
+
+
+```{r import, include=FALSE}
+pre_sheet <- "https://docs.google.com/spreadsheets/d/1R16PlsMiakKfRtoDW5f5tvpKH7R7vefR5WkGrqJlvk0/edit#gid=0"
+pre_survey <- read_sheet(pre_sheet) %>%
+  select(-Name)
+pre_survey$when <- "pre"
+
+post_sheet <- "https://docs.google.com/spreadsheets/d/1dPBomyBW0K0njBK-ciGuk-IUvyrnDDX5a4kRG4rJtZ0/edit#gid=0"
+post_survey <- read_sheet(post_sheet) %>%
+  select(c(1:14)) %>%
+  rename(ID = Respondent)
+post_survey$when <- "post"
+
+combined_survey <- rbind(pre_survey, post_survey)
+```
+
+Before the course, participants were asked to rank their level of comfort with, or understanding of, a series of topics. Later, following completion of the course, they completed the same exercise.
+
+```{r topic-summary, echo=FALSE, results='asis'}
+names(combined_survey) <- names(combined_survey) %>%
+  sub(pattern = "Please rate your level of comfort with, or understanding of, the following",
+      replacement = "") %>%
+  str_replace_all(pattern = "\\[|\\]", replacement = "") %>%
+  trimws()
+
+cat(paste0("\n- `", names(combined_survey[2:14]), "`"), sep = "\n")
+```
+
+For the purposes of analysis, each of these topics was simplified as follows. The topics were also categorised by theme.
+
+```{r topic-names, echo=FALSE}
+og_names <- names(combined_survey)
+combined_survey <- combined_survey %>%
+  rename("metadata" = "The existence or role of metadata in a sequencing project",
+         "sequence_data_org_format" = "The organisation and format of sequence data (any)",
+         "file_system_org" = "Organising a file system for a bioinformatics project",
+         "cloud_comp" = "Cloud computing",
+         "cloud_server_connection" = "Connecting to a cloud server such as AWS, Microsoft Azure or Google Cloud Platform",
+         "basic_shell_commands" = "Using  a shell and commands such as ls, pwd, mkdir, cat",
+         "file_system" = "Working directories, paths and avigating a file system from the command line",
+         "file_permissions" = "Viewing and changing file permissions in the shell",
+         "grep" = "The search tool grep",
+         "nano" = "Using a text editor like nano to write shell scripts",
+         "read_quality" = "Assessing read quality of sequence data",
+         "trimming_filtering" = "Trimming and filtering sequence data",
+         "variant_calling" = "Variant calling")
+
+new_names <- names(combined_survey)
+```
+
+```{r pivot-to-long, echo=FALSE}
+#pivot to long (tidy) format
+combined_survey_long <- combined_survey %>%
+  pivot_longer(!c(ID, when), names_to = "topic", values_to = "rating")
+
+combined_survey_long$topic <- factor(combined_survey_long$topic, levels = combined_survey_long[1:13,]$topic)
+```
+
+```{r theme, echo=FALSE}
+#add theme column
+combined_survey_long <- combined_survey_long %>% 
+  mutate(theme = case_when(
+    topic == "metadata" ~ "project-org",
+    topic == "file_system_org" ~ "project-org",
+    topic == "sequence_data_org_format" ~ "project-org",
+    topic == "cloud_comp" ~ "command-line",
+    topic == "grep" ~ "command-line",
+    topic == "nano" ~ "command-line",
+    topic == "file_system" ~ "command-line",
+    topic == "file_permissions" ~ "command-line",
+    topic == "cloud_server_connection" ~ "command-line",
+    topic == "basic_shell_commands" ~ "command-line",
+    topic == "read_quality" ~ "genomics",
+    topic == "trimming_filtering" ~ "genomics",
+    topic == "variant_calling" ~ "genomics"
+  ))
+
+kable(data.frame(og_names[2:14], new_names[2:14], combined_survey_long[1:13,5]), col.names = c("Original name", "Shortened name", "Theme"), full_width = F)
+```
+
+The participants responded to each topic by choosing one of six statements. For purposes of analysis, these statements were codified as numerical values, with 1 being least comfortable and 6 being most comfortable.
+
+```{r numerical-rating, echo=FALSE}
+#factorise ratings
+understanding_levels <- c("I don't understand what this involves",
+                          "I would recognise this but don't really use it",
+                          "I've used a bit but am not comfortable with it",
+                          "Fairly comfortable in some aspects",
+                          "Comfortable most of the time",
+                          "Confident")
+combined_survey_long$rating <- factor(combined_survey_long$rating, levels = understanding_levels)
+
+#add column with numerical rating
+combined_survey_long$rating_numeric <- combined_survey_long$rating %>%
+  str_replace_all("I don't understand what this involves", "1") %>%
+  str_replace_all("I would recognise this but don't really use it", "2") %>%
+  str_replace_all("I've used a bit but am not comfortable with it", "3") %>%
+  str_replace_all("Fairly comfortable in some aspects", "4") %>%
+  str_replace_all("Comfortable most of the time", "5") %>%
+  str_replace_all("Confident", "6")
+combined_survey_long$rating_numeric <- as.numeric(combined_survey_long$rating_numeric)
+
+#remove lines containing NA
+combined_survey_long <- na.omit(combined_survey_long)
+
+kable(data.frame(understanding_levels, c(1,2,3,4,5,6)), col.names = c("Understanding Statement", "Numerical Value"), full_width = F)
+
+```
+
+The mean rating given to each topic before and after the course can be compared using a dumbbell plot.
+
+```{r means, echo=FALSE, message=FALSE, warning=FALSE}
+#get pre and post means
+combined_survey_means <- combined_survey_long %>% 
+  group_by(topic, theme, when) %>% 
+  summarise(
+    rating_numeric = mean(rating_numeric)) %>%
+  pivot_wider(names_from = when, values_from = rating_numeric)
+
+dumbbell <- ggplot() +
+  #draw dotted tracking guides
+  geom_segment(
+    data = combined_survey_means,
+    aes(x = 1, xend = pre, y = topic, yend = topic),
+    linetype = "dotted",
+    size = 0.5,
+    color = "gray80") +
+  #draw segment between pre and post
+  geom_segment(
+    data = combined_survey_means %>%
+      group_by(topic) %>%
+      summarise(start = range(pre)[1], end = range(post)[2], theme = theme) %>%
+      ungroup(),
+    aes(x = start, xend = end, y = topic, yend = topic, color = theme, size = 1)) +
+  #plot pre value as point
+  geom_point_interactive(
+    data = combined_survey_means,
+    aes(pre, topic, color = theme, tooltip = pre),
+    size = 5) +
+  scale_colour_manual(values = c("#85E0FF", "#BDB2B2", "#FCC5C5"), name = "Theme",
+                      label = c("Command Line", "Genomics", "Project Org")) +
+  new_scale_colour() +
+  #plot post value as point
+  geom_point_interactive(
+    data = combined_survey_means,
+    aes(post, topic, color = theme, tooltip = post),
+    size = 5) +
+  scale_colour_manual(values = c("#0086B2", "#7E6C6C", "#F87575"),
+                      label = c("Command Line", "Genomics", "Project Org")) +
+  xlim(1,6) +
+  xlab("Rating") +
+  ylab("Topic") +
+  guides(size=F, colour = guide_legend("Theme")) +
+  theme_minimal() +
+  labs(caption = c("Least confident", "Most confident")) +
+  theme(plot.caption = element_text(hjust=c(0, 1)))
+ggiraph(ggobj = dumbbell)
+```
+ 
+ We can see that in general participants felt they improved their confidence in all topics measured, by an average of around two points.
+ 
+ This means most people went from a score of around 2 ("I would recognise this but don't really use it") to 4 ("Fairly comfortable in some aspects") or even 5 ("Comfortable most of the time").
+ 
+ On average, participants felt they improved most at using the command line, followed by project organisation. This is even clearer if we look at the overall trends for each theme.
+
+```{r means_by_theme, echo=FALSE, message=FALSE, warning=FALSE}
+combined_survey_means_themes <- combined_survey_means %>%
+  group_by(theme) %>%
+  summarise(mean_post = mean(post), mean_pre = mean(pre))
+
+combined_survey_means_themes$mean_pre <- round(combined_survey_means_themes$mean_pre, 2)
+combined_survey_means_themes$mean_post <- round(combined_survey_means_themes$mean_post, 2)
+
+dumbbell_means <- ggplot() +
+  #draw dotted tracking guides
+  geom_segment(
+    data = combined_survey_means_themes,
+    aes(x = 1, xend = mean_pre, y = theme, yend = theme),
+    linetype = "dotted",
+    size = 0.5,
+    color = "gray80") +
+  #draw segment between pre and post
+  geom_segment(
+    data = combined_survey_means_themes %>%
+      group_by(theme) %>%
+      summarise(start = range(mean_pre)[1], end = range(mean_post)[2], theme = theme) %>%
+      ungroup(),
+    aes(x = start, xend = end, y = theme, yend = theme, color = theme, size = 1)) +
+  #plot pre value as point
+  geom_point_interactive(
+    data = combined_survey_means_themes,
+    aes(mean_pre, theme, color = theme, tooltip = mean_pre),
+    size = 5) +
+  scale_colour_manual(values = c("#85E0FF", "#BDB2B2", "#FCC5C5"), name = "Theme",
+                      label = c("Command Line", "Genomics", "Project Org")) +
+  new_scale_colour() +
+  #plot post value as point
+  geom_point_interactive(
+    data = combined_survey_means_themes,
+    aes(mean_post, theme, color = theme, tooltip = mean_post),
+    size = 5) +
+  scale_colour_manual(values = c("#0086B2", "#7E6C6C", "#F87575"),
+                      label = c("Command Line", "Genomics", "Project Org")) +
+  xlim(1,6) +
+  xlab("Rating") +
+  ylab("Topic") +
+  guides(size=F, colour = guide_legend("Theme")) +
+  theme_minimal() +
+  labs(caption = c("Least confident", "Most confident")) +
+  theme(plot.caption = element_text(hjust=c(0, 1)))
+ggiraph(ggobj = dumbbell_means)
+
+```
+ 
+This result is unsurprising given the amount of practice that participants had at using the command line throughout the four day course, and taking into account the rushed nature of the genomics content.
+
+Participants finished the course feeling either fairly or mostly comfortable in topics around the command line and project management, but were not yet comfortable with genomic topics.
